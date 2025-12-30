@@ -1,0 +1,164 @@
+// backend/src/routes/product.routes.js
+import express from 'express';
+import Product from '../models/Product.js';
+
+const router = express.Router();
+
+// GET /api/products - Liste avec TOUS les filtres possibles
+router.get('/', async (req, res) => {
+  try {
+    const {
+      category,       // ID de catégorie
+      brand,          // marque (exacte, insensible à la casse)
+      minPrice,       // prix minimum (basePrice)
+      maxPrice,       // prix maximum
+      inStock = 'false', // true → produits avec stock > 0 (global ou variantes)
+      search,         // recherche dans nom ou slug (partielle)
+      isFeatured      // true → seulement produits en vedette
+    } = req.query;
+
+    // Construction du filtre dynamique MongoDB
+    let filter = {};
+
+    // 1. Catégorie
+    if (category) filter.category = category;
+
+    // 2. Marque (insensible à la casse)
+    if (brand) filter.brand = new RegExp(`^${brand}$`, 'i');
+
+    // 3. Prix (basePrice)
+    if (minPrice || maxPrice) {
+      filter.basePrice = {};
+      if (minPrice) filter.basePrice.$gte = Number(minPrice);
+      if (maxPrice) filter.basePrice.$lte = Number(maxPrice);
+    }
+
+    // 4. En stock (global OU au moins une variante avec stock > 0)
+    if (inStock === 'true') {
+      filter.$or = [
+        { stock: { $gt: 0 } },
+        { 'variants.stock': { $gt: 0 } }
+      ];
+    }
+
+    // 5. Produits mis en avant
+    if (isFeatured === 'true') {
+      filter.isFeatured = true;
+    }
+
+    // 6. Recherche par nom ou slug (partielle, insensible à la casse)
+    if (search) {
+      const regex = new RegExp(search, 'i');
+      filter.$or = [
+        { name: regex },
+        { slug: regex }
+      ];
+    }
+
+    // Exécution : populate catégorie + tri par date récente
+    const products = await Product.find(filter)
+      .populate('category')
+      .sort({ createdAt: -1 });
+
+    res.json(products);
+  } catch (error) {
+    console.error('Erreur filtre produits:', error);
+    res.status(500).json({ message: 'Erreur serveur', error: error.message });
+  }
+});
+
+// GET /api/products/:id → Détails d'un produit
+router.get('/:id', async (req, res) => {
+  try {
+    const product = await Product.findById(req.params.id).populate('category');
+    if (!product) return res.status(404).json({ message: 'Produit non trouvé' });
+    res.json(product);
+  } catch (error) {
+    res.status(500).json({ message: 'Erreur serveur', error: error.message });
+  }
+});
+
+// POST /api/products → Créer (slug généré ici)
+router.post('/', async (req, res) => {
+  try {
+    const { name, description, basePrice, category, brand, images, variants, stock, specs, discount, isFeatured } = req.body;
+
+    if (!name || !basePrice || !category) {
+      return res.status(400).json({ message: 'Nom, prix de base et catégorie obligatoires' });
+    }
+
+    let slug = name
+      .toLowerCase()
+      .replace(/\s+/g, '-')
+      .replace(/[^\w\-]+/g, '')
+      .replace(/\-\-+/g, '-')
+      .trim();
+
+    const productData = {
+      name,
+      slug,
+      description,
+      basePrice,
+      category,
+      brand: brand || '',
+      images: images || [],
+      variants: variants || [],
+      stock: stock || 0,
+      specs: specs || {},
+      discount: discount || 0,
+      isFeatured: isFeatured || false,
+    };
+
+    const newProduct = new Product(productData);
+    await newProduct.save();
+
+    res.status(201).json(newProduct);
+  } catch (error) {
+    if (error.code === 11000) {
+      return res.status(400).json({ message: 'Produit existe déjà (nom ou slug)' });
+    }
+    res.status(500).json({ message: 'Erreur création produit', error: error.message });
+  }
+});
+
+// PUT /api/products/:id → Modifier
+router.put('/:id', async (req, res) => {
+  try {
+    const productData = req.body;
+
+    // Régénérer slug si nom changé
+    if (productData.name) {
+      productData.slug = productData.name
+        .toLowerCase()
+        .replace(/\s+/g, '-')
+        .replace(/[^\w\-]+/g, '')
+        .replace(/\-\-+/g, '-')
+        .trim();
+    }
+
+    const updated = await Product.findByIdAndUpdate(req.params.id, productData, {
+      new: true,
+      runValidators: true,
+    });
+
+    if (!updated) return res.status(404).json({ message: 'Produit non trouvé' });
+
+    res.json(updated);
+  } catch (error) {
+    if (error.code === 11000) return res.status(400).json({ message: 'Nom ou slug déjà utilisé' });
+    res.status(500).json({ message: 'Erreur modification', error: error.message });
+  }
+});
+
+// DELETE /api/products/:id → Supprimer
+router.delete('/:id', async (req, res) => {
+  try {
+    const product = await Product.findByIdAndDelete(req.params.id);
+    if (!product) return res.status(404).json({ message: 'Produit non trouvé' });
+    res.json({ message: 'Produit supprimé avec succès' });
+  } catch (error) {
+    res.status(500).json({ message: 'Erreur suppression', error: error.message });
+  }
+});
+
+export default router;
